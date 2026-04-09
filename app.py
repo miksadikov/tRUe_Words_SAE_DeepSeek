@@ -58,14 +58,456 @@ class DependencyAIDetector:
         return dep_seq
 
     def predict_proba(self, text):
-        # Извлечение зависимостей
         dep_seq = self.extract_dependency_sequence(text)
-        
-        # Векторизация текста
         transformed_text = self.vectorizer.transform([dep_seq])
-        
-        # Получаем вероятность, что текст сгенерирован ИИ
-        return self.model.predict_proba(transformed_text)[0, 1]
+        return _predict_dependency_ai_proba(self.model, transformed_text)
+
+
+
+DEPENDENCY_LABEL_EXPLANATIONS = {
+    "dep": {
+        "short": "dep",
+        "label": "неуточнённая зависимость",
+        "description": "парсер не смог выбрать более точный тип связи; такой сигнал требует осторожной интерпретации"
+    },
+    "nmod": {
+        "short": "nmod",
+        "label": "номинальный модификатор",
+        "description": "одно существительное уточняет другое существительное"
+    },
+    "root": {
+        "short": "root",
+        "label": "корневой узел предложения",
+        "description": "главный предикат или центр синтаксической структуры"
+    },
+    "ccomp": {
+        "short": "ccomp",
+        "label": "комплементное придаточное",
+        "description": "придаточная часть передаёт содержание мысли, речи или оценки"
+    },
+    "det": {
+        "short": "det",
+        "label": "детерминатив",
+        "description": "уточняющее слово вроде указателя или определителя"
+    },
+    "advmod": {
+        "short": "advmod",
+        "label": "обстоятельственный модификатор",
+        "description": "слово уточняет действие или признак по способу, степени или времени"
+    },
+    "obl": {
+        "short": "obl",
+        "label": "косвенный именной компонент",
+        "description": "именная группа при сказуемом, задающая контекст места, времени, причины и т.д."
+    },
+    "punct": {
+        "short": "punct",
+        "label": "пунктуационный элемент",
+        "description": "знак препинания как часть синтаксической структуры"
+    },
+    "cc": {
+        "short": "cc",
+        "label": "сочинительный союз",
+        "description": "союз вроде «и», «а», «но», соединяющий однородные элементы"
+    },
+    "conj": {
+        "short": "conj",
+        "label": "сочинительная связь",
+        "description": "связь между однородными элементами или частями конструкции"
+    },
+    "nsubj": {
+        "short": "nsubj",
+        "label": "подлежащее",
+        "description": "носитель действия или состояния"
+    },
+    "obj": {
+        "short": "obj",
+        "label": "прямое дополнение",
+        "description": "объект действия"
+    },
+    "case": {
+        "short": "case",
+        "label": "падежный/предложный маркер",
+        "description": "служебное слово, маркирующее падежную связь"
+    },
+    "amod": {
+        "short": "amod",
+        "label": "определение-прилагательное",
+        "description": "прилагательное уточняет существительное"
+    },
+    "appos": {
+        "short": "appos",
+        "label": "приложение",
+        "description": "поясняющая именная группа рядом с другим существительным"
+    },
+    "flat:foreign": {
+        "short": "flat:foreign",
+        "label": "иностранный плоский фрагмент",
+        "description": "неразложимое иностранное словосочетание"
+    },
+}
+
+
+def _sigmoid(x):
+    x = np.clip(x, -50, 50)
+    return 1.0 / (1.0 + np.exp(-x))
+
+
+def _dependency_pattern_to_display(pattern):
+    tags = [t for t in pattern.split() if t]
+    if not tags:
+        return {
+            "exact_pattern": pattern,
+            "readable_pattern": pattern,
+            "explanation": "",
+        }
+
+    label_parts = []
+    explanation_parts = []
+    for tag in tags:
+        info = DEPENDENCY_LABEL_EXPLANATIONS.get(tag)
+        if info is None:
+            label_parts.append(tag)
+            explanation_parts.append(f"{tag}: служебный синтаксический маркер")
+        else:
+            label_parts.append(f"{tag} — {info['label']}")
+            explanation_parts.append(f"{tag}: {info['description']}")
+
+    readable_pattern = " → ".join(label_parts) if len(label_parts) > 1 else label_parts[0]
+    explanation = "; ".join(explanation_parts)
+    return {
+        "exact_pattern": pattern,
+        "readable_pattern": readable_pattern,
+        "explanation": explanation,
+    }
+
+
+def _matrix_to_1d_array(X):
+    if hasattr(X, "toarray"):
+        return np.asarray(X.toarray(), dtype=np.float32)[0]
+    return np.asarray(X, dtype=np.float32).reshape(-1)
+
+
+AI_LABEL_HINTS = ("ai", "machine", "generated", "synthetic", "llm", "gpt", "bot")
+HUMAN_LABEL_HINTS = ("human", "человек", "author", "real")
+
+
+def _infer_ai_class_index(clf):
+    classes = getattr(clf, "classes_", None)
+    if classes is None:
+        return 1, {"mode": "default", "classes": None}
+
+    labels = [str(c).strip().lower() for c in classes]
+    for idx, label in enumerate(labels):
+        if any(hint in label for hint in AI_LABEL_HINTS):
+            return idx, {"mode": "label_hint", "classes": list(classes)}
+
+    for idx, label in enumerate(labels):
+        if any(hint in label for hint in HUMAN_LABEL_HINTS) and len(labels) == 2:
+            return 1 - idx, {"mode": "inverse_human_hint", "classes": list(classes)}
+
+    return 1, {"mode": "default", "classes": list(classes)}
+
+
+def _predict_dependency_ai_proba(clf, X):
+    proba = np.asarray(clf.predict_proba(X), dtype=np.float64)
+    ai_idx, _ = _infer_ai_class_index(clf)
+
+    if proba.ndim == 1:
+        flat = proba.reshape(-1)
+        if flat.size == 1:
+            return float(flat[0])
+        if flat.size >= 2:
+            ai_idx = min(ai_idx, flat.size - 1)
+            return float(flat[ai_idx])
+
+    if proba.ndim == 2:
+        ai_idx = min(ai_idx, proba.shape[1] - 1)
+        return float(proba[0, ai_idx])
+
+    flat = proba.reshape(-1)
+    ai_idx = min(ai_idx, max(0, flat.size - 1))
+    return float(flat[ai_idx])
+
+
+def _estimate_dependency_feature_impacts(clf, X, feature_names, tfidf_values, prob_ai, max_features=40):
+    active_idx = np.flatnonzero(tfidf_values > 0)
+    if active_idx.size == 0:
+        return []
+
+    if active_idx.size > max_features:
+        order = np.argsort(tfidf_values[active_idx])[::-1]
+        active_idx = active_idx[order[:max_features]]
+
+    X_csr = X.tocsr() if hasattr(X, "tocsr") else X
+    rows = []
+
+    for feat_idx in active_idx:
+        X_mod = X_csr.copy()
+        if hasattr(X_mod, "tocsr"):
+            X_mod = X_mod.tocsr()
+            row_start, row_end = X_mod.indptr[0], X_mod.indptr[1]
+            local_pos = np.where(X_mod.indices[row_start:row_end] == feat_idx)[0]
+            if local_pos.size == 0:
+                continue
+            data_pos = row_start + int(local_pos[0])
+            original_value = float(X_mod.data[data_pos])
+            X_mod.data[data_pos] = 0.0
+            X_mod.eliminate_zeros()
+        else:
+            X_mod = np.asarray(X_mod).copy()
+            if feat_idx >= X_mod.shape[1]:
+                continue
+            original_value = float(X_mod[0, feat_idx])
+            X_mod[0, feat_idx] = 0.0
+
+        try:
+            prob_without = _predict_dependency_ai_proba(clf, X_mod)
+        except Exception:
+            continue
+
+        impact_pp = (float(prob_ai) - float(prob_without)) * 100.0
+        display = _dependency_pattern_to_display(feature_names[feat_idx])
+        rows.append({
+            "pattern": feature_names[feat_idx],
+            "exact_pattern": display["exact_pattern"],
+            "readable_pattern": display["readable_pattern"],
+            "explanation": display["explanation"],
+            "tfidf_value": float(tfidf_values[feat_idx]),
+            "original_feature_value": original_value,
+            "prob_without_ai_pct": float(prob_without) * 100.0,
+            "impact_pp": float(impact_pp),
+            "abs_impact_pp": abs(float(impact_pp)),
+            "direction": "ai" if float(impact_pp) > 0 else "human",
+        })
+
+    total_abs = float(sum(row["abs_impact_pp"] for row in rows))
+    for row in rows:
+        row["share_abs_pct"] = (row["abs_impact_pp"] / total_abs * 100.0) if total_abs > 0 else 0.0
+
+    rows.sort(key=lambda row: row["abs_impact_pp"], reverse=True)
+    return rows
+
+
+def _get_dependency_local_contributions(clf, X):
+    contrib_values = None
+    bias = 0.0
+    mode = "approx"
+
+    # LightGBM sklearn API
+    try:
+        contrib = clf.predict(X, pred_contrib=True)
+        contrib = np.asarray(contrib, dtype=np.float32)
+        if contrib.ndim == 2 and contrib.shape[0] == 1 and contrib.shape[1] >= 2:
+            contrib_values = contrib[0, :-1]
+            bias = float(contrib[0, -1])
+            mode = "pred_contrib"
+    except TypeError:
+        pass
+    except Exception:
+        pass
+
+    # booster_ fallback
+    if contrib_values is None and hasattr(clf, "booster_"):
+        try:
+            contrib = clf.booster_.predict(X, pred_contrib=True)
+            contrib = np.asarray(contrib, dtype=np.float32)
+            if contrib.ndim == 2 and contrib.shape[0] == 1 and contrib.shape[1] >= 2:
+                contrib_values = contrib[0, :-1]
+                bias = float(contrib[0, -1])
+                mode = "pred_contrib"
+        except Exception:
+            pass
+
+    if contrib_values is None:
+        tfidf_values = _matrix_to_1d_array(X)
+        importances = getattr(clf, "feature_importances_", None)
+        if importances is None:
+            importances = np.ones_like(tfidf_values, dtype=np.float32)
+        else:
+            importances = np.asarray(importances, dtype=np.float32)
+            if importances.shape[0] != tfidf_values.shape[0]:
+                importances = np.resize(importances, tfidf_values.shape[0])
+        contrib_values = tfidf_values * importances
+
+    raw_score = None
+    if mode == "pred_contrib":
+        raw_score = float(np.sum(contrib_values) + bias)
+    else:
+        try:
+            raw = clf.predict(X, raw_score=True)
+            raw_score = float(np.asarray(raw).reshape(-1)[0])
+        except Exception:
+            raw_score = None
+
+    return np.asarray(contrib_values, dtype=np.float32), bias, mode, raw_score
+
+
+def _build_dependency_feature_rows(feature_names, tfidf_values, contrib_values, prob_ai, raw_score=None):
+    rows = []
+    total_abs = float(np.sum(np.abs(contrib_values)))
+    for feature_name, tfidf_value, contrib in zip(feature_names, tfidf_values, contrib_values):
+        contrib = float(contrib)
+        if float(tfidf_value) <= 0 and abs(contrib) < 1e-10:
+            continue
+
+        display = _dependency_pattern_to_display(feature_name)
+        delta_prob_pp = None
+        prob_without = None
+        if raw_score is not None:
+            prob_without = float(_sigmoid(raw_score - contrib))
+            delta_prob_pp = (float(prob_ai) - prob_without) * 100.0
+
+        odds_multiplier = float(np.exp(min(abs(contrib), 12.0)))
+
+        rows.append({
+            "pattern": feature_name,
+            "exact_pattern": display["exact_pattern"],
+            "readable_pattern": display["readable_pattern"],
+            "explanation": display["explanation"],
+            "tfidf_value": float(tfidf_value),
+            "contribution": contrib,
+            "abs_contribution": abs(contrib),
+            "share_abs_pct": (abs(contrib) / total_abs * 100.0) if total_abs > 0 else 0.0,
+            "delta_prob_pp": delta_prob_pp,
+            "prob_without_ai_pct": (prob_without * 100.0) if prob_without is not None else None,
+            "odds_multiplier": odds_multiplier,
+            "direction": "ai" if contrib > 0 else ("human" if contrib < 0 else "neutral"),
+        })
+
+    rows.sort(key=lambda row: abs(row["contribution"]), reverse=True)
+    return rows
+
+
+
+
+def _build_dependency_active_patterns(feature_names, tfidf_values, limit=6):
+    active_idx = np.flatnonzero(tfidf_values > 0)
+    if active_idx.size == 0:
+        return []
+
+    order = active_idx[np.argsort(tfidf_values[active_idx])[::-1]]
+    selected = order[:limit]
+    total_selected = float(np.sum(tfidf_values[selected])) if selected.size else 0.0
+
+    rows = []
+    for feat_idx in selected:
+        feature_name = feature_names[feat_idx]
+        display = _dependency_pattern_to_display(feature_name)
+        token_count = len([t for t in feature_name.split() if t])
+        rows.append({
+            "pattern": feature_name,
+            "exact_pattern": display["exact_pattern"],
+            "readable_pattern": display["readable_pattern"],
+            "explanation": display["explanation"],
+            "tfidf_value": float(tfidf_values[feat_idx]),
+            "prominence_pct": (float(tfidf_values[feat_idx]) / total_selected * 100.0) if total_selected > 0 else 0.0,
+            "ngram_order": token_count,
+            "ngram_label": "одиночная связь" if token_count == 1 else f"цепочка из {token_count} связей",
+        })
+    return rows
+
+def _dependency_reliability(doc):
+    tokens = [t for t in doc if not t.is_space]
+    token_count = len(tokens)
+    sent_count = len(list(doc.sents))
+    dep_ratio = 0.0
+    if token_count:
+        dep_ratio = sum(1 for t in tokens if t.dep_ == "dep") / token_count
+
+    score = 0
+    reasons = []
+
+    if token_count >= 120:
+        score += 2
+        reasons.append("текст достаточно длинный для устойчивого dependency-анализа")
+    elif token_count >= 60:
+        score += 1
+        reasons.append("длина текста приемлема, но не максимальна для синтаксического анализа")
+    else:
+        reasons.append("текст короткий, поэтому синтаксические сигналы менее устойчивы")
+
+    if sent_count >= 4:
+        score += 1
+        reasons.append("в тексте несколько предложений, поэтому решение опирается не на один фрагмент")
+    else:
+        reasons.append("предложений мало, часть вывода может зависеть от одного-двух фрагментов")
+
+    if dep_ratio <= 0.08:
+        score += 1
+        reasons.append("доля неуточнённых связей dep невысокая, парсер увереннее в разборе")
+    elif dep_ratio <= 0.15:
+        reasons.append("доля неуточнённых связей dep умеренная")
+    else:
+        reasons.append("доля неуточнённых связей dep повышенная, интерпретацию нужно читать осторожно")
+
+    if score >= 4:
+        label = "высокая"
+    elif score >= 2:
+        label = "средняя"
+    else:
+        label = "ограниченная"
+
+    return {
+        "label": label,
+        "token_count": token_count,
+        "sentence_count": sent_count,
+        "dep_ratio_pct": dep_ratio * 100.0,
+        "reasons": reasons,
+    }
+
+
+def _select_dependency_sentence_examples(doc, vectorizer, clf, overall_is_ai, limit=4):
+    sentence_rows = []
+    sentence_texts = []
+    for sent in doc.sents:
+        sent_text = sent.text.strip()
+        if not sent_text:
+            continue
+        word_count = len([t for t in sent if not t.is_punct and not t.is_space])
+        sentence_texts.append((sent_text, word_count, sent))
+
+    filtered = [(txt, wc, sent) for txt, wc, sent in sentence_texts if wc >= 5]
+    if not filtered:
+        filtered = sentence_texts
+
+    feature_names = vectorizer.get_feature_names_out()
+
+    for sent_text, word_count, sent in filtered:
+        dep_seq = " ".join(token.dep_ for token in sent if not token.is_space)
+        if not dep_seq.strip():
+            continue
+        X_sent = vectorizer.transform([dep_seq])
+        try:
+            sent_prob = _predict_dependency_ai_proba(clf, X_sent)
+        except Exception:
+            continue
+        tfidf_values = _matrix_to_1d_array(X_sent)
+        sent_rows = _estimate_dependency_feature_impacts(clf, X_sent, feature_names, tfidf_values, sent_prob, max_features=12)
+
+        if overall_is_ai:
+            best_row = next((row for row in sent_rows if row["impact_pp"] > 0), sent_rows[0] if sent_rows else None)
+            support_margin = sent_prob - 0.5
+        else:
+            best_row = next((row for row in sent_rows if row["impact_pp"] < 0), sent_rows[0] if sent_rows else None)
+            support_margin = 0.5 - sent_prob
+
+        if best_row is None:
+            continue
+
+        sentence_rows.append({
+            "sentence": sent_text if len(sent_text) <= 260 else sent_text[:257] + "...",
+            "word_count": word_count,
+            "prob_ai_pct": sent_prob * 100.0,
+            "support_margin_pct": max(0.0, support_margin * 100.0),
+            "top_pattern": best_row["exact_pattern"],
+            "top_pattern_readable": best_row["readable_pattern"],
+            "top_pattern_impact_pp": best_row["impact_pp"],
+        })
+
+    sentence_rows.sort(key=lambda row: row["support_margin_pct"], reverse=True)
+    return sentence_rows[:limit]
+
 
 class RussianAIDetector:
     def __init__(self, model_path="./local_model", xgb_path="diveye_llmtrace_ru_booster.pkl"):
@@ -753,126 +1195,113 @@ class CombinedAIDetector:
 }
 
 # Функция для расширенного анализа DependencyAI
-def extended_analysis(file_path):
-    # Проверка на существование файла
-    if not os.path.exists(file_path):
-        return "Файл не найден."
+def extended_analysis(text_or_file_path, detector=None, vectorizer_path='dependency_vectorizer.pkl', model_path='dependency_model.pkl'):
+    is_path = isinstance(text_or_file_path, str) and os.path.exists(text_or_file_path)
+    if is_path:
+        with open(text_or_file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+    else:
+        content = str(text_or_file_path or '')
 
-    # Загрузка моделей
+    if not content.strip():
+        return {"error": "Недостаточно текста для DependencyAI-анализа."}
+
     try:
-        vectorizer = joblib.load('dependency_vectorizer.pkl')
-        clf = joblib.load('dependency_model.pkl')
+        if detector is None:
+            detector = DependencyAIDetector(vectorizer_path, model_path)
+        vectorizer = detector.vectorizer
+        clf = detector.model
     except FileNotFoundError:
-        return "Ошибка: Модели не найдены."
+        return {"error": "Ошибка: модели DependencyAI не найдены."}
+    except Exception as e:
+        return {"error": f"Ошибка загрузки DependencyAI: {str(e)}"}
 
-    # Чтение содержимого файла
-    with open(file_path, 'r', encoding='utf-8') as f:
-        content = f.read()
-
-    # Создаем экземпляр класса DependencyAIDetector
-    dependency_model = DependencyAIDetector('dependency_vectorizer.pkl', 'dependency_model.pkl')
-    
-    # Используем метод extract_dependency_sequence
-    dep_seq = dependency_model.extract_dependency_sequence(content)
-
-    # Преобразуем вектора текста в матрицу TF-IDF
+    dep_seq = detector.extract_dependency_sequence(content)
     tfidf_matrix = vectorizer.transform([dep_seq])
-    tfidf_df = pd.DataFrame(tfidf_matrix.toarray(), columns=vectorizer.get_feature_names_out())
+    feature_names = vectorizer.get_feature_names_out()
+    tfidf_values = _matrix_to_1d_array(tfidf_matrix)
 
-    # Извлечение признаков
-    tfidf_weights = tfidf_df.iloc[0].values
-    global_importances = clf.feature_importances_
-    local_contributions = tfidf_weights * global_importances
-
-    # Создаем DataFrame с результатами
-    results_df = pd.DataFrame({
-        'pattern': vectorizer.get_feature_names_out(),
-        'contribution': local_contributions
-    }).sort_values(by='contribution', ascending=False)
-
-    # Оставляем только топ-10 по вкладу
-    top_results = results_df[results_df['contribution'] > 0].head(10).copy()
-    
-    # Нормализация вкладов в проценты (среди топ-10)
-    total_contribution = top_results['contribution'].sum() if not top_results.empty else 0.0
-    top_results['share_pct'] = top_results['contribution'] / total_contribution * 100 if total_contribution > 0 else 0.0
-
-    # Стиль для "человеческих" характеристик
-    human_style_map = {
-        'punct': 'Стандартная пунктуация (запятые/точки)',
-        'cc conj': 'Однотипные перечисления или союзы (И/А/НО)',
-        'obl': 'Избыток уточнений (где/когда/почему)',
-        'advmod': 'Частое использование обстоятельств (как/каким образом)',
-        'root': 'Предсказуемая структура главного действия (глагола)',
-        'nmod': 'Нанизывание существительных (канцелярит)',
-        'nsubj': 'Типичное подлежащее (кто/что)',
-        'amod': 'Обилие описательных прилагательных',
-        'conj': 'Сочинительная связь',
-        'dep': 'Зависимый элемент (связка)',
-        'obj': 'Прямое дополнение',
-        'case': 'Предложная конструкция',
-        'flat:foreign': 'Иностранные заимствования/слова',
-        'appos': 'Поясняющее приложение'
-    }
-
-    # Перевод паттернов в читабельный формат
-    def translate_pattern(p):
-        if p in human_style_map:
-            return human_style_map[p]
-        tags = p.split()
-        return " + ".join([human_style_map.get(t, t) for t in tags])
-
-    top_results['readable_style'] = top_results['pattern'].apply(translate_pattern)
-
-    # Получаем предсказание вероятности для ИИ
-    prob = float(clf.predict_proba(tfidf_df)[0][1])  # P(AI) для DependencyAI
-    is_ai = prob > 0.5
-    confidence = prob if is_ai else (1 - prob)  # уверенность в выбранном вердикте
+    prob = _predict_dependency_ai_proba(clf, tfidf_matrix)
+    is_ai = prob >= 0.5
+    confidence = prob if is_ai else (1.0 - prob)
     verdict_text = "Текст сгенерирован с помощью ИИ" if is_ai else "Текст написан человеком"
 
-    description_text = """
-    Метод DependencyAI работает так: он не просто смотрит на слова в тексте, 
-    а строит «скелет» каждого предложения (что с чем связано). 
-    Подробнее про метод можно почитать здесь: 
-    <a href="https://arxiv.org/pdf/2602.15514" target="_blank" rel="noopener">ссылка на статью</a>.
-    """
+    prob_ai_pct = prob * 100.0
+    prob_human_pct = (1.0 - prob) * 100.0
+    margin_pct = abs(prob - 0.5) * 100.0
+    margin_side = "в пользу ИИ" if is_ai else "в пользу человеческого текста"
 
-    # Создаем график
-    plt.figure(figsize=(18, 10))
-    sns.barplot(
-        x="share_pct",
-        y="readable_style",
-        data=top_results.sort_values("share_pct", ascending=True),
-        palette="magma",
-        hue="readable_style",
-        legend=False
+    if confidence >= 0.95:
+        signal_strength = "высокая"
+    elif confidence >= 0.80:
+        signal_strength = "средняя"
+    else:
+        signal_strength = "умеренная"
+
+    active_patterns = _build_dependency_active_patterns(feature_names, tfidf_values, limit=6)
+
+    img_path = None
+
+    doc = detector.nlp(content)
+    reliability = _dependency_reliability(doc)
+
+    description_text = (
+        "DependencyAI анализирует не сами слова, а последовательность синтаксических связей в тексте. "
+        "Текст сначала проходит dependency-разбор, затем связи переводятся в TF–IDF признаки, "
+        "после чего классификатор оценивает вероятность ИИ. "
+        "Подробнее про метод можно почитать здесь: "
+        '<a href="https://arxiv.org/pdf/2602.15514" target="_blank" rel="noopener">ссылка на статью</a>.'
     )
-    plt.title("Почему модель решила именно так", fontsize=24)
-    plt.xlabel("Доля вклада в решение, %", fontsize=18)
-    plt.ylabel("Стилистический паттерн (скелет фразы)", fontsize=18)
-    plt.grid(axis="x", linestyle="--", alpha=0.35)
 
+    method_note = (
+        "DependencyAI принимает решение по совокупности синтаксических паттернов текста, а не по одному отдельному признаку."
+    )
 
-    plt.xticks(fontsize=16)
-    plt.yticks(fontsize=16)
+    if active_patterns:
+        patterns_note = (
+            "Ниже показаны наиболее заметные dependency-паттерны, которые встретились в текущем тексте."
+        )
+    else:
+        patterns_note = "Не удалось выделить заметные dependency-паттерны для показа."
 
-    img_path = "static/extended_analysis_image.png"
-    plt.tight_layout()
-    plt.subplots_adjust(left=0.38)
-    plt.savefig(img_path, dpi=200, bbox_inches="tight")
-    plt.close()
+    glossary_tags = []
+    seen = set()
+    for row in active_patterns:
+        for tag in [tag for tag in row["pattern"].split() if tag]:
+            if tag in seen:
+                continue
+            seen.add(tag)
+            info = DEPENDENCY_LABEL_EXPLANATIONS.get(tag)
+            if info is None:
+                glossary_tags.append({
+                    "tag": tag,
+                    "label": "служебный маркер",
+                    "description": "редкий или нерасшифрованный тип синтаксической связи",
+                })
+            else:
+                glossary_tags.append({
+                    "tag": tag,
+                    "label": info["label"],
+                    "description": info["description"],
+                })
 
-    # Преобразуем top_results в список словарей
-    top_results_list = top_results[['readable_style', 'share_pct']].to_dict(orient='records')
-
-    # Возвращаем данные для шаблона
     return {
         "verdict_text": verdict_text,
         "confidence_pct": confidence * 100.0,
-        "prob_ai_pct": prob * 100.0,
-        "top_results_list": top_results_list,
+        "prob_ai_pct": prob_ai_pct,
+        "prob_human_pct": prob_human_pct,
+        "threshold_pct": 50.0,
+        "margin_pct": margin_pct,
+        "margin_side": margin_side,
+        "signal_strength": signal_strength,
+        "description_text": description_text,
+        "method_note": method_note,
+        "patterns_note": patterns_note,
         "img_path": img_path,
-        "description_text": description_text
+        "analysis_mode": "compact_probability_and_patterns",
+        "reliability": reliability,
+        "active_patterns": active_patterns,
+        "glossary_tags": glossary_tags,
     }
 
 def extended_analysis_diveye(text, detector, diveye_ai_prob):
@@ -1241,7 +1670,7 @@ def extended_analysis_page():
 
     diveye_ai_prob = float(request.form.get("diveye_ai_prob", 0.5))
 
-    dep = extended_analysis('temp_text.txt')
+    dep = extended_analysis(text, detector=dependency_model)
     diveye = extended_analysis_diveye(text, diveye_model, diveye_ai_prob)
     sae = extended_analysis_sae_deepseek(text, sae_xgb_model)
 

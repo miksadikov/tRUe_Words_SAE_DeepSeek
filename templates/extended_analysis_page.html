@@ -26,7 +26,7 @@
 
         .analysis-image {
             width: 100%;
-            max-width: 1200px;
+            max-width: 920px;
             display: block;
             margin: 18px 0 10px;
             border-radius: 16px;
@@ -77,6 +77,85 @@
             border-radius: 16px;
             padding: 14px 16px;
         }
+
+        .signal-columns {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 18px;
+            margin-top: 18px;
+        }
+
+        .signal-box {
+            background: #fff;
+            border: 1px solid var(--border);
+            border-radius: 18px;
+            padding: 16px;
+        }
+
+        .signal-box h4 {
+            margin-top: 0;
+            margin-bottom: 12px;
+        }
+
+        .signal-box--ai {
+            border-left: 5px solid #ef4444;
+        }
+
+        .signal-box--human {
+            border-left: 5px solid #3b82f6;
+        }
+
+        .signal-meta {
+            font-size: 0.95rem;
+            color: #425466;
+            margin-top: 6px;
+        }
+
+        .sentence-list {
+            display: grid;
+            gap: 14px;
+            margin-top: 16px;
+        }
+
+        .sentence-item {
+            background: #fff;
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 14px 16px;
+        }
+
+        .sentence-text {
+            margin: 8px 0 10px;
+            line-height: 1.55;
+        }
+
+        .glossary-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 14px;
+            margin-top: 16px;
+        }
+
+        .glossary-item {
+            background: #fff;
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 14px 16px;
+        }
+
+        .glossary-tag {
+            font-weight: 800;
+            color: var(--primary);
+        }
+
+        .note-box {
+            background: #f8fbff;
+            border: 1px solid #d7e6ff;
+            border-radius: 16px;
+            padding: 14px 16px;
+            margin-top: 16px;
+        }
+
     </style>
 </head>
 <body>
@@ -91,17 +170,48 @@
         <div class="analysis-block">
             <h2>Расширенный анализ по методу DependencyAI</h2>
 
-            <p><strong>{{ dep.verdict_text }}</strong> (Уверенность: {{ dep.confidence_pct | round(2) }}%)</p>
-            <p>{{ dep.description_text | safe }}</p>
+            {% if dep.error %}
+                <div class="error-box">{{ dep.error }}</div>
+            {% else %}
+                <p><strong>{{ dep.verdict_text }}</strong> (Уверенность: {{ dep.confidence_pct | round(2) }}%)</p>
+                <p>{{ dep.description_text | safe }}</p>
 
-            <img src="{{ dep.img_path }}" alt="График DependencyAI" class="analysis-image">
+                <div class="note-box">{{ dep.method_note }}</div>
 
-            <h3>Какие стилистические отпечатки сильнее всего повлияли на вывод</h3>
-            <ul class="analysis-list">
-                {% for item in dep.top_results_list %}
-                    <li><strong>{{ item['readable_style'] }}</strong> — {{ item['share_pct'] | round(1) }}% вклада в решение модели.</li>
-                {% endfor %}
-            </ul>
+                <h3>Наиболее заметные dependency-паттерны в этом тексте</h3>
+                <p>{{ dep.patterns_note }}</p>
+                {% if dep.active_patterns %}
+                <div class="signal-box">
+                    <ul class="analysis-list">
+                        {% for item in dep.active_patterns %}
+                        <li>
+                            <strong>{{ item.exact_pattern }}</strong> — {{ item.readable_pattern }}.<br>
+                            <span class="signal-meta">
+                                Выраженность среди показанных паттернов — {{ item.prominence_pct | round(1) }}%; тип признака — {{ item.ngram_label }}.
+                            </span><br>
+                            <span class="signal-meta">{{ item.explanation }}</span>
+                        </li>
+                        {% endfor %}
+                    </ul>
+                </div>
+                {% else %}
+                    <p>Заметные dependency-паттерны не найдены.</p>
+                {% endif %}
+
+                <h3>Справка по dependency-меткам, которые встретились в показанных паттернах</h3>
+                {% if dep.glossary_tags %}
+                <div class="glossary-grid">
+                    {% for item in dep.glossary_tags %}
+                    <div class="glossary-item">
+                        <div class="glossary-tag">{{ item.tag }}</div>
+                        <div><strong>{{ item.label }}</strong></div>
+                        <div class="signal-meta">{{ item.description }}</div>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% endif %}
+
+            {% endif %}
         </div>
         {% endif %}
 
