@@ -12,9 +12,9 @@
 <body>
   <div id="loadingOverlay" class="loading-overlay" style="display:none;">
     <div class="loading-box">
-      <div class="spinner"></div>
-      <div class="loading-title">Идёт анализ текста</div>
-      <div class="loading-subtitle">Это может занять некоторое время. Пожалуйста, подождите…</div>
+      <div class="spinner" id="loadingSpinner"></div>
+      <div class="loading-title" id="loadingTitle">Идёт анализ текста</div>
+      <div class="loading-subtitle" id="loadingSubtitle">Это может занять некоторое время. Пожалуйста, подождите…</div>
     </div>
   </div>
 
@@ -125,17 +125,6 @@
               <div>Вес ансамбля DependencyAI + DivEye</div>
               <div>{{ (result.legacy_ensemble_weight * 100) | round(0) }}%</div>
             </div>
-
-            {% if result.ensemble_rationale %}
-            <div class="result__row result__row--muted" style="display:block;">
-              <div style="margin-bottom:8px;"><strong>Почему итоговый вес выбран именно так</strong></div>
-              <ul style="margin:0; padding-left:18px;">
-                {% for reason in result.ensemble_rationale[:3] %}
-                  <li>{{ reason }}</li>
-                {% endfor %}
-              </ul>
-            </div>
-            {% endif %}
         {% endif %}
 
         <form class="form" method="post" action="/predict" enctype="multipart/form-data" id="analyzeForm">
@@ -202,11 +191,7 @@
         </div>
         <div class="footer__note">Демо‑веб‑интерфейс для запуска моделей детектирования ИИ‑текстов на русском языке.</div>
       </div>
-      <div class="footer__right">
-        <a class="footer__link" href="#scan">Сканирование</a>
-        <a class="footer__link" href="#features">О сервисе</a>
-        <a class="footer__link" href="#how">Как это работает</a>
-      </div>
+      <div class="footer__right"></div>
     </div>
   </footer>
 

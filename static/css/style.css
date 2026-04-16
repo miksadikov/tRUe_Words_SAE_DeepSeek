@@ -295,6 +295,7 @@ body{
   line-height:1.6;
 }
 .footer__right{display:flex;gap:14px;flex-wrap:wrap;}
+.footer__right:empty{display:none;}
 .footer__link{color:rgba(15,23,42,.70);text-decoration:none;font-weight:700;font-size:13px;}
 .footer__link:hover{color:rgba(15,23,42,1);}
 
@@ -351,6 +352,10 @@ body{
   border-top-color: #2563eb;
   border-radius: 50%;
   animation: spin 0.9s linear infinite;
+}
+
+.spinner--green {
+  border-top-color: #22c55e;
 }
 
 .loading-title {
