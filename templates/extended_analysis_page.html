@@ -167,55 +167,62 @@
         {% endif %}
 
         {% if dep %}
-        <div class="analysis-block">
-            <h2>Расширенный анализ по методу DependencyAI</h2>
+<div class="analysis-block">
+    <h2>Почему метод DependencyAI решил, что текст вероятно {% if dep.prob_ai_pct >= 50 %}сгенерирован с помощью ИИ{% else %}написан человеком{% endif %}</h2>
 
-            {% if dep.error %}
-                <div class="error-box">{{ dep.error }}</div>
-            {% else %}
-                <p><strong>{{ dep.verdict_text }}</strong> (Уверенность: {{ dep.confidence_pct | round(2) }}%)</p>
-                <p>{{ dep.description_text | safe }}</p>
+    {% if dep.error %}
+        <div class="error-box">{{ dep.error }}</div>
+    {% else %}
+        <p><strong>{{ dep.main_statement }}</strong></p>
+        <p>{{ dep.summary_text }}</p>
 
-                <div class="note-box">{{ dep.method_note }}</div>
+        {% if dep.chart_path %}
+        <img src="{{ dep.chart_path }}" alt="Влияние групп синтаксических признаков" class="analysis-image" style="max-width: 760px;">
+        {% endif %}
 
-                <h3>Наиболее заметные dependency-паттерны в этом тексте</h3>
-                <p>{{ dep.patterns_note }}</p>
-                {% if dep.active_patterns %}
-                <div class="signal-box">
-                    <ul class="analysis-list">
-                        {% for item in dep.active_patterns %}
-                        <li>
-                            <strong>{{ item.exact_pattern }}</strong> — {{ item.readable_pattern }}.<br>
-                            <span class="signal-meta">
-                                Выраженность среди показанных паттернов — {{ item.prominence_pct | round(1) }}%; тип признака — {{ item.ngram_label }}.
-                            </span><br>
-                            <span class="signal-meta">{{ item.explanation }}</span>
-                        </li>
-                        {% endfor %}
-                    </ul>
+        <h3>Три главные причины</h3>
+        <div class="analysis-cards">
+            {% for item in dep.main_reasons %}
+            <div class="analysis-card">
+                <div class="analysis-card__title">{{ item.title }}</div>
+                <div class="signal-meta">
+                    В этом тексте: {{ item.token_share_pct | round(1) }}% синтаксических связей и {{ item.feature_share_pct | round(1) }}% активных признаков модели.
                 </div>
-                {% else %}
-                    <p>Заметные dependency-паттерны не найдены.</p>
-                {% endif %}
+                <p style="margin-top:10px;">{{ item.reason_text }}</p>
+            </div>
+            {% endfor %}
+        </div>
 
-                <h3>Справка по dependency-меткам, которые встретились в показанных паттернах</h3>
-                {% if dep.glossary_tags %}
-                <div class="glossary-grid">
-                    {% for item in dep.glossary_tags %}
-                    <div class="glossary-item">
-                        <div class="glossary-tag">{{ item.tag }}</div>
-                        <div><strong>{{ item.label }}</strong></div>
-                        <div class="signal-meta">{{ item.description }}</div>
-                    </div>
-                    {% endfor %}
-                </div>
-                {% endif %}
-
-            {% endif %}
+        {% if dep.counter_signal and dep.counter_signal.support_delta_pp < -0.05 %}
+        <h3>Что немного противоречило этому выводу</h3>
+        <div class="analysis-card">
+            <div class="analysis-card__title">{{ dep.counter_signal.title }}</div>
+            <div class="signal-meta">
+                В этом тексте: {{ dep.counter_signal.token_share_pct | round(1) }}% синтаксических связей и {{ dep.counter_signal.feature_share_pct | round(1) }}% активных признаков модели.
+            </div>
+            <p style="margin-top:10px;">{{ dep.counter_signal.reason_text }}</p>
         </div>
         {% endif %}
 
-        {% if diveye %}
+        {% if dep.example_fragments %}
+        <h3>Где это заметнее всего в тексте</h3>
+        <div class="sentence-list">
+            {% for item in dep.example_fragments %}
+            <div class="sentence-item">
+                <div><strong>{{ item.group_title }}</strong></div>
+                <div class="sentence-text">{{ item.text }}</div>
+                <div class="signal-meta">
+                    В этом фрагменте на данную группу приходится {{ item.ratio_pct | round(1) }}% синтаксических связей ({{ item.count }} связ.).
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+    {% endif %}
+</div>
+{% endif %}
+
+{% if diveye %}
         <div class="analysis-block">
             <h2>Расширенный анализ по методу DivEye</h2>
 
@@ -254,101 +261,54 @@
           <h2>Расширенный анализ по методу SAE/DeepSeek</h2>
 
           {% if sae.error %}
-            <p class="error">{{ sae.error }}</p>
+            <div class="error-box">{{ sae.error }}</div>
           {% else %}
-            <p>
-              <strong>
-                Текст классифицирован как
-                {% if sae.prediction == "ИИ-ГЕНЕРИРОВАННЫЙ" %}
-                  ИИ-сгенерированный
-                {% else %}
-                  написанный человеком
-                {% endif %}
-              </strong>
-              (Уверенность: {{ (sae.ai_score * 100) | round(1) }}%)
-            </p>
+            <p><strong>{{ sae.prediction_text }}</strong></p>
+            <p>{{ sae.summary_text }}</p>
+            <p>{{ sae.model_stage_explanation }}</p>
+            <p>{{ sae.simple_conclusion }}</p>
 
-            <p>
-              Метод SAE/DeepSeek анализирует скрытые признаки текста, извлечённые из внутреннего представления языковой модели DeepSeek-R1-Distill-Qwen-1.5B. Затем XGBoost оценивает, какие из этих признаков сильнее всего указывают на AI-генерацию или на человеческое авторство.
-            </p>
-
-            <p>
-              В этом приложении используется слой {{ sae.layer }} и hookpoint {{ sae.hookpoint_name }}.
-            </p>
-
-            <div class="analysis-cards" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); gap:16px; margin:20px 0;">
-              <div class="card" style="padding:16px;">
-                <h4 style="margin-top:0;">Суммарный сигнал AI-признаков</h4>
-                <p style="font-weight:700; color:#5b5cff; margin-bottom:8px;">
-                  {{ sae.summary.ai_signal_pct }}% вклада
-                </p>
-                <p style="margin:0;">
-                  Этот блок показывает, насколько сильно активные признаки SAE в совокупности подталкивали решение в сторону AI-генерации.
-                </p>
+            <div class="analysis-cards">
+              <div class="analysis-card">
+                <div class="analysis-card__title">Вероятность ИИ-текста</div>
+                <div class="analysis-card__share">{{ sae.ai_probability_pct | round(1) }}%</div>
+                <div>Оценка того, что текст был сгенерирован моделью.</div>
               </div>
 
-              <div class="card" style="padding:16px;">
-                <h4 style="margin-top:0;">Суммарный сигнал human-признаков</h4>
-                <p style="font-weight:700; color:#5b5cff; margin-bottom:8px;">
-                  {{ sae.summary.human_signal_pct }}% вклада
-                </p>
-                <p style="margin:0;">
-                  Этот блок отражает, какая часть признаков поддерживала гипотезу о человеческом тексте.
-                </p>
+              <div class="analysis-card">
+                <div class="analysis-card__title">Вероятность человеческого текста</div>
+                <div class="analysis-card__share">{{ sae.human_probability_pct | round(1) }}%</div>
+                <div>Оценка того, что текст написан человеком.</div>
               </div>
 
-              <div class="card" style="padding:16px;">
-                <h4 style="margin-top:0;">Доминирование ключевых латентов</h4>
-                <p style="font-weight:700; color:#5b5cff; margin-bottom:8px;">
-                  {{ sae.summary.dominance_pct }}% вклада
-                </p>
-                <p style="margin:0;">
-                  Этот показатель показывает, насколько решение определяется небольшим числом наиболее сильных скрытых признаков.
-                </p>
+              <div class="analysis-card">
+                <div class="analysis-card__title">Запас до порога 50%</div>
+                <div class="analysis-card__share">{{ sae.margin_pct | round(1) }} п.п.</div>
+                <div>Чем больше этот запас, тем увереннее текущий вывод модели.</div>
+              </div>
+
+              <div class="analysis-card">
+                <div class="analysis-card__title">Обработано токенов</div>
+                <div class="analysis-card__share">{{ sae.analyzed_tokens }}</div>
+                <div>Столько внутренних позиций текста модель реально использовала при анализе.</div>
               </div>
             </div>
-
-            {% if sae.barplot_path %}
-              <div class="analysis-image" style="margin:20px 0;">
-                <img src="{{ sae.barplot_path }}" alt="Топ-10 SAE-признаков по вкладу">
-              </div>
-            {% endif %}
 
             {% if sae.activation_plot_path %}
-              <div class="analysis-image" style="margin:20px 0;">
-                <img src="{{ sae.activation_plot_path }}" alt="Активация ключевого SAE-признака">
-              </div>
+              <img src="{{ sae.activation_plot_path }}" alt="Где по тексту проявлялся ключевой внутренний сигнал" class="analysis-image">
             {% endif %}
 
-            <div style="margin-top:24px;">
-              <h3>Какие признаки SAE/DeepSeek сильнее всего повлияли на решение</h3>
-
-              {% if sae.top_ai_features %}
-                <p><strong>Топ-5 AI-признаков:</strong></p>
-                <ul>
-                  {% for feat in sae.top_ai_features %}
-                    <li>
-                      <strong>SAE-признак #{{ feat.feature_idx }}</strong>
-                      — вклад {{ feat.contribution | round(4) }},
-                      активация {{ feat.activation | round(4) }}.
-                    </li>
-                  {% endfor %}
-                </ul>
-              {% endif %}
-
-              {% if sae.top_human_features %}
-                <p><strong>Топ-3 human-признаков:</strong></p>
-                <ul>
-                  {% for feat in sae.top_human_features %}
-                    <li>
-                      <strong>SAE-признак #{{ feat.feature_idx }}</strong>
-                      — вклад {{ feat.contribution | round(4) }},
-                      активация {{ feat.activation | round(4) }}.
-                    </li>
-                  {% endfor %}
-                </ul>
-              {% endif %}
-            </div>
+            {% if sae.key_signal_fragments %}
+              <h3>Какие участки текста сильнее всего поддержали этот вывод</h3>
+              <div class="sentence-list">
+                {% for frag in sae.key_signal_fragments %}
+                <div class="sentence-item">
+                  <div class="sentence-text">{{ frag.text }}</div>
+                  <div class="signal-meta">Позиция в тексте: {{ frag.position }}</div>
+                </div>
+                {% endfor %}
+              </div>
+            {% endif %}
           {% endif %}
         </div>
         {% endif %}

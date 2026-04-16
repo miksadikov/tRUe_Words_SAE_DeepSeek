@@ -407,6 +407,211 @@ def _build_dependency_active_patterns(feature_names, tfidf_values, limit=6):
         })
     return rows
 
+DEPENDENCY_SIGNAL_GROUPS = [
+    {
+        "id": "coordination",
+        "title": "Соединительные конструкции и перечисления",
+        "tags": {"cc", "conj"},
+        "what_it_means": "насколько текст опирается на однотипные соединения частей фразы и перечисления",
+        "supports_ai": "такая структура выглядит более шаблонной и чаще встречается у машинно сгенерированных текстов",
+        "supports_human": "такая структура выглядит менее шаблонной и ближе к естественной человеческой манере письма",
+    },
+    {
+        "id": "function_words",
+        "title": "Служебные синтаксические связи",
+        "tags": {"case", "mark", "det", "aux", "cop", "fixed"},
+        "what_it_means": "насколько плотно текст опирается на служебные слова и формальные грамматические связки",
+        "supports_ai": "повышенная плотность таких связей делает синтаксис более формальным и 'машинно-ровным'",
+        "supports_human": "умеренная плотность таких связей делает синтаксис менее формальным и указывает на то, что текст мог быть написан человеком",
+    },
+    {
+        "id": "modifiers",
+        "title": "Уточняющие и модифицирующие связи",
+        "tags": {"amod", "nmod", "advmod", "obl", "appos", "acl", "acl:relcl"},
+        "what_it_means": "насколько текст насыщен уточнениями, определениями и дополнительными модификаторами",
+        "supports_ai": "избыточная насыщенность уточнениями делает текст более тяжёлым и типологически ближе к ИИ",
+        "supports_human": "умеренное число уточнений делает текст более естественным и указывает на то, что текст мог быть написан человеком",
+    },
+    {
+        "id": "clause_frame",
+        "title": "Каркас высказывания",
+        "tags": {"root", "nsubj", "obj", "iobj", "csubj", "ccomp", "xcomp", "expl"},
+        "what_it_means": "как распределены главные синтаксические роли внутри предложений",
+        "supports_ai": "более однообразный каркас высказывания делает текст похожим на генеративный шаблон",
+        "supports_human": "более свободный и не шаблонный каркас высказывания указывает на то, что текст написан человеком",
+    },
+    {
+        "id": "punctuation",
+        "title": "Пунктуационное членение",
+        "tags": {"punct", "parataxis"},
+        "what_it_means": "как часто синтаксис опирается на явное пунктуационное разделение фрагментов",
+        "supports_ai": "слишком ровное пунктуационное членение нередко сопровождает сгенерированный текст",
+        "supports_human": "более естественное пунктуационное членение указывает на то, что текст написан человеком",
+    },
+]
+
+
+def _safe_pct(numerator, denominator):
+    return (float(numerator) / float(denominator) * 100.0) if denominator else 0.0
+
+
+def _dependency_sentence_text(sent):
+    text = sent.text.strip().replace("\n", " ")
+    return re.sub(r"\s+", " ", text)
+
+
+def _dependency_group_feature_mask(feature_names, group_tags):
+    mask = []
+    for name in feature_names:
+        tags = set(t for t in str(name).split() if t)
+        mask.append(bool(tags & group_tags))
+    return np.asarray(mask, dtype=bool)
+
+
+def _dependency_ablate_feature_group(tfidf_matrix, selected_indices):
+    if len(selected_indices) == 0:
+        return tfidf_matrix
+
+    X_mod = tfidf_matrix.copy().tocsr()
+    row_start, row_end = X_mod.indptr[0], X_mod.indptr[1]
+    row_indices = X_mod.indices[row_start:row_end]
+    mask = np.isin(row_indices, np.asarray(selected_indices, dtype=np.int32))
+    if np.any(mask):
+        X_mod.data[row_start:row_end][mask] = 0.0
+        X_mod.eliminate_zeros()
+    return X_mod
+
+
+def _dependency_build_signal_groups(doc, clf, tfidf_matrix, feature_names, tfidf_values, prob_ai):
+    tokens = [t for t in doc if not t.is_space]
+    total_token_count = len(tokens)
+    active_total = float(np.sum(tfidf_values[tfidf_values > 0]))
+    final_is_ai = prob_ai >= 0.5
+    final_class_label = "ИИ" if final_is_ai else "человек"
+    final_conf_before = float(prob_ai if final_is_ai else (1.0 - prob_ai))
+
+    rows = []
+    for group in DEPENDENCY_SIGNAL_GROUPS:
+        group_tags = set(group["tags"])
+        feature_mask = _dependency_group_feature_mask(feature_names, group_tags)
+        selected_idx = np.flatnonzero(feature_mask)
+        selected_active = selected_idx[tfidf_values[selected_idx] > 0] if selected_idx.size else np.asarray([], dtype=np.int32)
+        tfidf_sum = float(np.sum(tfidf_values[selected_active])) if selected_active.size else 0.0
+
+        group_token_count = sum(1 for t in tokens if t.dep_ in group_tags)
+        token_share_pct = _safe_pct(group_token_count, total_token_count)
+        feature_share_pct = _safe_pct(tfidf_sum, active_total)
+
+        X_mod = _dependency_ablate_feature_group(tfidf_matrix, selected_active)
+        prob_without = _predict_dependency_ai_proba(clf, X_mod)
+        final_conf_without = float(prob_without if final_is_ai else (1.0 - prob_without))
+        support_delta_pp = (final_conf_before - final_conf_without) * 100.0
+
+        sentence_rows = []
+        for sent in doc.sents:
+            sent_tokens = [t for t in sent if not t.is_space]
+            if not sent_tokens:
+                continue
+            count = sum(1 for t in sent_tokens if t.dep_ in group_tags)
+            if count == 0:
+                continue
+            ratio = _safe_pct(count, len(sent_tokens))
+            sentence_rows.append({
+                "text": _dependency_sentence_text(sent),
+                "count": count,
+                "ratio_pct": ratio,
+                "token_count": len(sent_tokens),
+            })
+        sentence_rows.sort(key=lambda row: (row["ratio_pct"], row["count"]), reverse=True)
+
+        matching_tags = sorted({tag for idx in selected_active[:12] for tag in str(feature_names[idx]).split() if tag in group_tags})
+
+        rows.append({
+            "id": group["id"],
+            "title": group["title"],
+            "tags": sorted(group_tags),
+            "what_it_means": group["what_it_means"],
+            "supports_ai": group["supports_ai"],
+            "supports_human": group["supports_human"],
+            "token_count": int(group_token_count),
+            "token_share_pct": float(token_share_pct),
+            "feature_share_pct": float(feature_share_pct),
+            "active_feature_count": int(selected_active.size),
+            "prob_without_ai_pct": float(prob_without * 100.0),
+            "support_delta_pp": float(support_delta_pp),
+            "supports_final_verdict": bool(support_delta_pp > 0),
+            "sentence_rows": sentence_rows,
+            "matching_tags": matching_tags,
+        })
+
+    rows.sort(key=lambda row: abs(row["support_delta_pp"]), reverse=True)
+    return rows
+
+
+def _dependency_group_reason_text(row, final_is_ai, final_conf_before):
+    before_pct = float(final_conf_before * 100.0)
+    without_pct = float(before_pct - row["support_delta_pp"])
+    effect_abs = abs(float(row["support_delta_pp"]))
+
+    if row["supports_final_verdict"]:
+        if final_is_ai:
+            direction_text = "поддержал вывод о машинном происхождении текста"
+            interpretation = row["supports_ai"]
+        else:
+            direction_text = "поддержал вывод о человеческом авторстве"
+            interpretation = row["supports_human"]
+        impact_text = (
+            f"Если временно убрать из модели все признаки этой группы, уверенность в текущем выводе "
+            f"снизится с {before_pct:.2f}% до {without_pct:.2f}% "
+            f"(на {effect_abs:.2f} п.п.)."
+        )
+    else:
+        if final_is_ai:
+            direction_text = "скорее мешал версии о машинном происхождении"
+            interpretation = row["supports_human"]
+        else:
+            direction_text = "скорее мешал версии о человеческом авторстве"
+            interpretation = row["supports_ai"]
+        impact_text = (
+            f"Если временно убрать из модели все признаки этой группы, уверенность в текущем выводе "
+            f"вырастет с {before_pct:.2f}% до {without_pct:.2f}% "
+            f"(на {effect_abs:.2f} п.п.)."
+        )
+
+    main_text = (
+        f"В этом тексте на группу «{row['title'].lower()}» приходится {row['token_share_pct']:.1f}% всех синтаксических связей "
+        f"и {row['feature_share_pct']:.1f}% активных dependency-признаков модели. "
+        f"Для данного текста этот сигнал {direction_text}: {interpretation}. {impact_text}"
+    )
+    return main_text
+
+
+def _dependency_make_group_plot(rows, final_is_ai):
+    if not rows:
+        return None
+
+    display_rows = rows[:5]
+    labels = [row['title'] for row in display_rows][::-1]
+    values = [row['support_delta_pp'] for row in display_rows][::-1]
+    colors = ['#2563eb' if v >= 0 else '#ef4444' for v in values]
+
+    plt.figure(figsize=(8.0, max(2.8, 0.55 * len(display_rows) + 0.8)))
+    ax = plt.gca()
+    ax.barh(labels, values, color=colors, height=0.48)
+    ax.axvline(0, color='#94a3b8', linewidth=1)
+    ax.set_xlabel('Влияние на уверенность в текущем выводе, п.п.')
+    ax.set_title('Какие группы синтаксических признаков сильнее всего повлияли на вердикт')
+    ax.grid(axis='x', linestyle='--', alpha=0.25)
+    for i, v in enumerate(values):
+        x = v + (0.35 if v >= 0 else -0.35)
+        ha = 'left' if v >= 0 else 'right'
+        ax.text(x, i, f'{v:+.2f}', va='center', ha=ha, fontsize=9)
+    plt.tight_layout()
+    out_path = 'static/dependency_group_impact.png'
+    plt.savefig(out_path, dpi=170, bbox_inches='tight')
+    plt.close()
+    return out_path
+
 def _dependency_reliability(doc):
     tokens = [t for t in doc if not t.is_space]
     token_count = len(tokens)
@@ -1221,87 +1426,72 @@ def extended_analysis(text_or_file_path, detector=None, vectorizer_path='depende
     feature_names = vectorizer.get_feature_names_out()
     tfidf_values = _matrix_to_1d_array(tfidf_matrix)
 
-    prob = _predict_dependency_ai_proba(clf, tfidf_matrix)
-    is_ai = prob >= 0.5
-    confidence = prob if is_ai else (1.0 - prob)
-    verdict_text = "Текст сгенерирован с помощью ИИ" if is_ai else "Текст написан человеком"
-
-    prob_ai_pct = prob * 100.0
-    prob_human_pct = (1.0 - prob) * 100.0
-    margin_pct = abs(prob - 0.5) * 100.0
-    margin_side = "в пользу ИИ" if is_ai else "в пользу человеческого текста"
-
-    if confidence >= 0.95:
-        signal_strength = "высокая"
-    elif confidence >= 0.80:
-        signal_strength = "средняя"
-    else:
-        signal_strength = "умеренная"
-
-    active_patterns = _build_dependency_active_patterns(feature_names, tfidf_values, limit=6)
-
-    img_path = None
+    prob_ai = _predict_dependency_ai_proba(clf, tfidf_matrix)
+    final_is_ai = prob_ai >= 0.5
+    final_conf = float(prob_ai if final_is_ai else (1.0 - prob_ai))
+    verdict_text = "текст ближе к сгенерированному с помощью ИИ" if final_is_ai else "текст написан человеком"
+    prob_ai_pct = float(prob_ai * 100.0)
+    prob_human_pct = float((1.0 - prob_ai) * 100.0)
 
     doc = detector.nlp(content)
-    reliability = _dependency_reliability(doc)
+    signal_rows = _dependency_build_signal_groups(doc, clf, tfidf_matrix, feature_names, tfidf_values, prob_ai)
+    supportive_rows = [row for row in signal_rows if row['supports_final_verdict']]
+    counter_rows = [row for row in signal_rows if not row['supports_final_verdict']]
+    supportive_rows.sort(key=lambda row: row['support_delta_pp'], reverse=True)
+    counter_rows.sort(key=lambda row: row['support_delta_pp'])
 
-    description_text = (
-        "DependencyAI анализирует не сами слова, а последовательность синтаксических связей в тексте. "
-        "Текст сначала проходит dependency-разбор, затем связи переводятся в TF–IDF признаки, "
-        "после чего классификатор оценивает вероятность ИИ. "
-        "Подробнее про метод можно почитать здесь: "
-        '<a href="https://arxiv.org/pdf/2602.15514" target="_blank" rel="noopener">ссылка на статью</a>.'
-    )
+    main_reasons = supportive_rows[:3] if supportive_rows else signal_rows[:3]
+    for row in main_reasons:
+        row['reason_text'] = _dependency_group_reason_text(row, final_is_ai, final_conf)
 
-    method_note = (
-        "DependencyAI принимает решение по совокупности синтаксических паттернов текста, а не по одному отдельному признаку."
-    )
+    counter_signal = counter_rows[0] if counter_rows else None
+    if counter_signal is not None:
+        counter_signal['reason_text'] = _dependency_group_reason_text(counter_signal, final_is_ai, final_conf)
 
-    if active_patterns:
-        patterns_note = (
-            "Ниже показаны наиболее заметные dependency-паттерны, которые встретились в текущем тексте."
-        )
-    else:
-        patterns_note = "Не удалось выделить заметные dependency-паттерны для показа."
-
-    glossary_tags = []
-    seen = set()
-    for row in active_patterns:
-        for tag in [tag for tag in row["pattern"].split() if tag]:
-            if tag in seen:
+    example_fragments = []
+    seen_sentences = set()
+    for row in main_reasons:
+        for sent in row['sentence_rows']:
+            if sent['text'] in seen_sentences:
                 continue
-            seen.add(tag)
-            info = DEPENDENCY_LABEL_EXPLANATIONS.get(tag)
-            if info is None:
-                glossary_tags.append({
-                    "tag": tag,
-                    "label": "служебный маркер",
-                    "description": "редкий или нерасшифрованный тип синтаксической связи",
-                })
-            else:
-                glossary_tags.append({
-                    "tag": tag,
-                    "label": info["label"],
-                    "description": info["description"],
-                })
+            seen_sentences.add(sent['text'])
+            example_fragments.append({
+                'group_title': row['title'],
+                'text': sent['text'],
+                'ratio_pct': sent['ratio_pct'],
+                'count': sent['count'],
+                'supports_final_verdict': row['supports_final_verdict'],
+            })
+            break
+        if len(example_fragments) >= 3:
+            break
+
+    chart_path = _dependency_make_group_plot(signal_rows, final_is_ai)
+
+    summary_text = (
+        f"DependencyAI оценил вероятность ИИ-текста в {prob_ai_pct:.2f}%, а вероятность того, что текст написан человеком в {prob_human_pct:.2f}%. "
+        f"Ниже показаны укрупнённые группы синтаксических признаков, которые сильнее всего повлияли на данный вердикт. "
+        f"Число на диаграмме показывает, на сколько процентных пунктов изменилась бы уверенность модели в текущем вердикте, "
+        f"если временно убрать из признаков все паттерны данной группы."
+    )
+
+    main_statement = (
+        f"Итог DependencyAI: {verdict_text}. "
+        f"Уверенность в текущем выводе — {final_conf * 100.0:.2f}%."
+    )
 
     return {
-        "verdict_text": verdict_text,
-        "confidence_pct": confidence * 100.0,
-        "prob_ai_pct": prob_ai_pct,
-        "prob_human_pct": prob_human_pct,
-        "threshold_pct": 50.0,
-        "margin_pct": margin_pct,
-        "margin_side": margin_side,
-        "signal_strength": signal_strength,
-        "description_text": description_text,
-        "method_note": method_note,
-        "patterns_note": patterns_note,
-        "img_path": img_path,
-        "analysis_mode": "compact_probability_and_patterns",
-        "reliability": reliability,
-        "active_patterns": active_patterns,
-        "glossary_tags": glossary_tags,
+        'verdict_text': verdict_text,
+        'confidence_pct': final_conf * 100.0,
+        'prob_ai_pct': prob_ai_pct,
+        'prob_human_pct': prob_human_pct,
+        'main_statement': main_statement,
+        'summary_text': summary_text,
+        'analysis_mode': 'grouped_explanatory_signals',
+        'chart_path': chart_path,
+        'main_reasons': main_reasons,
+        'counter_signal': counter_signal,
+        'example_fragments': example_fragments,
     }
 
 def extended_analysis_diveye(text, detector, diveye_ai_prob):
@@ -1353,11 +1543,22 @@ def extended_analysis_diveye(text, detector, diveye_ai_prob):
         "s_std": "Разброс неожиданности текста",
         "s_q90": "Высокие пики неожиданности",
         "d1_mean_abs": "Средняя сила локальных изменений",
-        "d1_std": "Разброс локальных изменений",
+        "d1_std": "Неровность локальных переходов",
         "d1_q90_abs": "Сильные локальные скачки",
         "d2_mean_abs": "Средняя глубинная неровность",
-        "d2_std": "Разброс глубинной неровности",
+        "d2_std": "Неровность смены ритма",
         "d2_q90_abs": "Сильные вторичные колебания",
+
+        # Старые имена признаков — нужны для совместимости со старыми моделями/конфигами
+        "s_var": "Разброс неожиданности текста",
+        "s_max": "Самый высокий пик неожиданности",
+        "d1_mean": "Средний локальный сдвиг surprisal",
+        "d1_var": "Неровность локальных переходов",
+        "d1_max": "Самый резкий локальный скачок",
+        "d2_mean": "Средняя глубинная неровность",
+        "d2_var": "Неровность смены ритма",
+        "d2_max": "Самый резкий перелом ритма",
+
         "token_count": "Длина текста в токенах",
         "mean_sent_len": "Средняя длина предложений",
         "std_sent_len": "Разброс длины предложений",
@@ -1367,21 +1568,33 @@ def extended_analysis_diveye(text, detector, diveye_ai_prob):
     }
 
     explanation_map = {
-        "s_mean": "Показывает, насколько текст в целом предсказуем для языковой модели.",
-        "s_std": "Показывает, насколько текст ровный или неоднородный по уровню неожиданности.",
-        "s_q90": "Отражает выраженные неожиданные участки текста.",
-        "d1_mean_abs": "Характеризует среднюю силу локальных изменений ритма.",
-        "d1_std": "Показывает, насколько неравномерно меняется ритм текста.",
-        "d1_q90_abs": "Выделяет сильные локальные переломы ритма.",
-        "d2_mean_abs": "Характеризует среднюю глубинную изменчивость ритма.",
-        "d2_std": "Показывает, насколько неоднородна глубинная динамика текста.",
-        "d2_q90_abs": "Фиксирует самые сильные вторичные колебания ритма.",
-        "token_count": "Длинные и короткие тексты ведут себя по-разному; длина помогает стабилизировать решение.",
-        "mean_sent_len": "Средняя длина предложений помогает учитывать общий стиль текста.",
-        "std_sent_len": "Разброс длины предложений показывает естественность структуры.",
-        "punct_ratio": "Доля пунктуации помогает учитывать форму изложения.",
-        "ttr": "Лексическое разнообразие помогает учитывать богатство словаря.",
-        "base_score": "Сигнал вашего базового детектора, усиленный DivEye.",
+        # Новые имена признаков
+        "s_mean": "показывает, насколько текст в целом предсказуем для языковой модели: чем значение выше, тем чаще встречаются неожиданные токены.",
+        "s_std": "показывает, насколько сильно surprisal колеблется по ходу текста: ровный текст даёт меньший разброс, более живой и неоднородный — больший.",
+        "s_q90": "фиксирует верхние пики неожиданности — короткие участки, где текст становится заметно менее предсказуемым.",
+        "d1_mean_abs": "характеризует среднюю силу локальных изменений ритма surprisal между соседними токенами.",
+        "d1_std": "показывает, насколько неравномерно меняются соседние участки текста: есть ли рваные переходы вместо слишком гладкой динамики.",
+        "d1_q90_abs": "выделяет сильные локальные скачки surprisal — места, где ритм неожиданности резко меняется.",
+        "d2_mean_abs": "оценивает глубинную изменчивость ритма — насколько часто меняется сам характер локальных переходов.",
+        "d2_std": "показывает неровность смены ритма: насколько текст чередует более плавные и более резкие участки.",
+        "d2_q90_abs": "фиксирует самые сильные вторичные колебания, то есть резкие переломы в уже меняющемся ритме surprisal.",
+
+        # Старые имена признаков
+        "s_var": "показывает, насколько сильно surprisal колеблется по ходу текста: ровный текст даёт меньший разброс, более живой и неоднородный — больший.",
+        "s_max": "показывает, встречаются ли в тексте очень неожиданные токены или короткие всплески неожиданности.",
+        "d1_mean": "характеризует среднее направление локальных сдвигов surprisal между соседними токенами.",
+        "d1_var": "показывает, насколько неодинаковы переходы между соседними токенами: есть ли рваные ускорения и замедления ритма.",
+        "d1_max": "фиксирует самый резкий локальный скачок surprisal — точку с максимальным мгновенным переломом ритма.",
+        "d2_mean": "оценивает среднюю глубинную изменчивость ритма, то есть общую выраженность вторых производных surprisal.",
+        "d2_var": "показывает, насколько часто текст резко меняет ритм неожиданности; это один из ключевых сигналов DivEye о слишком сглаженной или, наоборот, более живой динамике.",
+        "d2_max": "фиксирует самый сильный перелом ритма — место, где плавная динамика текста резко ломается.",
+
+        "token_count": "Длина текста помогает сделать ритмический анализ устойчивее: очень короткие и длинные тексты ведут себя по-разному.",
+        "mean_sent_len": "Средняя длина предложений помогает учитывать общий стиль развёртывания мысли.",
+        "std_sent_len": "Разброс длины предложений показывает, насколько текст монотонен или, наоборот, структурно разнообразен.",
+        "punct_ratio": "Доля пунктуации помогает учитывать, насколько часто автор дробит мысль и оформляет синтаксические паузы.",
+        "ttr": "Лексическое разнообразие помогает учесть, насколько текст повторяется по словарю.",
+        "base_score": "Это сигнал исходного детектора, который DivEye использует как дополнительную опору при комбинированном решении.",
     }
 
     feature_items = []
@@ -1390,7 +1603,9 @@ def extended_analysis_diveye(text, detector, diveye_ai_prob):
         feature_items.append({
             "name": readable_map.get(name, name),
             "share_pct": share_pct,
-            "explanation": explanation_map.get(name, "Дополнительный признак, влияющий на итоговое решение.")
+            "raw_name": name,
+            "value": float(features[feature_names.index(name)]) if name in feature_names else 0.0,
+            "explanation": explanation_map.get(name, "Этот дополнительный признак помогает DivEye точнее оценивать ритм неожиданности текста.")
         })
 
     feature_items = sorted(feature_items, key=lambda x: x["share_pct"], reverse=True)
@@ -1428,12 +1643,12 @@ def extended_analysis_diveye(text, detector, diveye_ai_prob):
 
     if is_ai:
         summary_text = (
-            "Улучшенный DivEye показал, что текст ближе к ИИ: вклад внесли и ритм surprisal, "
+            "DivEye показал, что текст ближе к сгенерированному с помощью ИИ: вклад внесли и ритм surprisal, "
             "и дополнительные стабилизирующие признаки."
         )
     else:
         summary_text = (
-            "Улучшенный DivEye показал, что текст ближе к человеческому: ритм surprisal и "
+            "DivEye показал, что текст вероятно написан человеком: ритм surprisal и "
             "дополнительные признаки не дают сильного сигнала в пользу ИИ."
         )
 
@@ -1473,7 +1688,6 @@ def extended_analysis_diveye(text, detector, diveye_ai_prob):
     }
 
 
-
 def extended_analysis_sae_deepseek(text, detector):
     try:
         if detector is None or not getattr(detector, "available", False):
@@ -1482,144 +1696,164 @@ def extended_analysis_sae_deepseek(text, detector):
         if not text or not text.strip():
             return {"error": "Пустой текст."}
 
+        import os
         import numpy as np
-        import pandas as pd
         import matplotlib.pyplot as plt
         import xgboost as xgb
 
-        # 1. Токенизация и проход через DeepSeek
+        os.makedirs("static", exist_ok=True)
+
+        # 1. Извлекаем признаки и токенные SAE-латенты
         X, sae_latents, batch = detector._extract_features([text], return_latents=True)
 
-        # 2. Предсказание и покомпонентные вклады XGBoost
+        # 2. Получаем вероятности и локальные вклады XGBoost
         booster = detector.clf.get_booster()
         dmatrix = xgb.DMatrix(X)
+        contribs = booster.predict(dmatrix, pred_contribs=True)[0]
 
-        contribs = booster.predict(dmatrix, pred_contribs=True)  # [1, F+1]
-        contribs = contribs[0]
-
-        feature_contribs = contribs[:-1]
-        bias_term = float(contribs[-1])
-
+        feature_contribs = np.asarray(contribs[:-1], dtype=np.float32)
         prob_ai = float(detector.clf.predict_proba(X)[0, 1])
-        prediction = "ИИ-ГЕНЕРИРОВАННЫЙ" if prob_ai >= 0.5 else "Человеческий"
+        prob_human = 1.0 - prob_ai
 
-        pooled_vec = X[0]
+        is_ai = prob_ai >= 0.5
+        prediction = "ИИ-генерированный" if is_ai else "Человеческий"
+        confidence_pct = round((prob_ai if is_ai else prob_human) * 100.0, 1)
+        ai_probability_pct = round(prob_ai * 100.0, 1)
+        human_probability_pct = round(prob_human * 100.0, 1)
+        margin_pct = round(abs(prob_ai - 0.5) * 100.0, 1)
 
-        top_abs_idx = np.argsort(np.abs(feature_contribs))[::-1][:10]
+        # 3. Готовим токены и трассы латентов
+        token_ids = batch["input_ids"][0].detach().cpu().tolist()
+        tokens = detector.tokenizer.convert_ids_to_tokens(token_ids)
+        attn_mask = batch["attention_mask"][0].detach().cpu().numpy().astype(bool)
 
-        top_df = pd.DataFrame({
-            "feature_idx": top_abs_idx,
-            "contribution": feature_contribs[top_abs_idx],
-            "abs_contribution": np.abs(feature_contribs[top_abs_idx]),
-            "activation": pooled_vec[top_abs_idx],
-        }).sort_values("abs_contribution", ascending=True)
+        tokens = [tok for tok, keep in zip(tokens, attn_mask) if keep]
+        analyzed_tokens = len(tokens)
 
-        pos_idx = np.where(feature_contribs > 0)[0]
-        neg_idx = np.where(feature_contribs < 0)[0]
+        sae_latents_np = sae_latents[0].detach().float().cpu().numpy()
+        sae_latents_np = sae_latents_np[attn_mask]
 
-        top_ai_idx = pos_idx[np.argsort(feature_contribs[pos_idx])[::-1][:5]] if len(pos_idx) > 0 else np.array([], dtype=int)
-        top_human_idx = neg_idx[np.argsort(feature_contribs[neg_idx])[:3]] if len(neg_idx) > 0 else np.array([], dtype=int)
+        abs_contribs = np.abs(feature_contribs)
+        if is_ai:
+            aligned_idx = np.where(feature_contribs > 0)[0]
+        else:
+            aligned_idx = np.where(feature_contribs < 0)[0]
 
-        top_ai_features = []
-        for idx in top_ai_idx:
-            top_ai_features.append({
-                "feature_idx": int(idx),
-                "contribution": float(feature_contribs[idx]),
-                "activation": float(pooled_vec[idx]),
-            })
+        if len(aligned_idx) > 0:
+            primary_idx = int(aligned_idx[np.argmax(np.abs(feature_contribs[aligned_idx]))])
+        else:
+            primary_idx = int(np.argmax(abs_contribs)) if abs_contribs.size else 0
 
-        top_human_features = []
-        for idx in top_human_idx:
-            top_human_features.append({
-                "feature_idx": int(idx),
-                "contribution": float(feature_contribs[idx]),
-                "activation": float(pooled_vec[idx]),
-            })
+        primary_trace = sae_latents_np[:, primary_idx] if sae_latents_np.size and primary_idx < sae_latents_np.shape[1] else np.array([])
 
-        plt.figure(figsize=(12, 5))
-        colors = ["#c0392b" if v > 0 else "#2980b9" for v in top_df["contribution"]]
-        plt.barh(
-            [f"SAE #{int(i)}" for i in top_df["feature_idx"]],
-            top_df["contribution"],
-            color=colors
-        )
-        plt.axvline(0, color="black", linewidth=1)
-        plt.title("Топ-10 SAE-признаков по вкладу в решение")
-        plt.xlabel("Вклад в решение XGBoost")
-        plt.ylabel("SAE-признак")
-        plt.tight_layout()
+        def token_window_to_text(center_pos, window=10):
+            start = max(0, center_pos - window)
+            end = min(len(tokens), center_pos + window + 1)
+            frag_tokens = tokens[start:end]
+            frag_text = detector.tokenizer.convert_tokens_to_string(frag_tokens)
+            frag_text = " ".join(frag_text.split())
+            return frag_text.strip()
 
-        barplot_path = "static/sae_analysis_barplot.png"
-        plt.savefig(barplot_path, bbox_inches="tight")
-        plt.close()
+        def pick_top_positions(values, k=3, min_gap=18):
+            if len(values) == 0:
+                return []
+            order = np.argsort(values)[::-1]
+            picked = []
+            for idx in order:
+                idx = int(idx)
+                if all(abs(idx - prev) >= min_gap for prev in picked):
+                    picked.append(idx)
+                if len(picked) >= k:
+                    break
+            return picked
 
-        if len(top_abs_idx) > 0:
-            top_feature_idx = int(top_abs_idx[0])
-
-            token_latents = sae_latents[0, :, top_feature_idx].detach().float().cpu().numpy()
-            token_ids = batch["input_ids"][0].detach().cpu().tolist()
-            tokens = detector.tokenizer.convert_ids_to_tokens(token_ids)
-
-            attn_mask = batch["attention_mask"][0].detach().cpu().numpy().astype(bool)
-            token_latents = token_latents[attn_mask]
-            tokens = [tok for tok, keep in zip(tokens, attn_mask) if keep]
-
-            x = np.arange(len(token_latents))
-
-            plt.figure(figsize=(13, 4.5))
-            plt.plot(x, token_latents, linewidth=1.8)
-            plt.title(f"Активация ключевого SAE-признака #{top_feature_idx} по токенам")
+        activation_plot_path = None
+        key_signal_fragments = []
+        if len(primary_trace) > 0:
+            x = np.arange(len(primary_trace))
+            plt.figure(figsize=(12, 4.1))
+            plt.plot(x, primary_trace, linewidth=1.8)
+            plt.title("Где по тексту сильнее всего проявлялся ключевой внутренний сигнал")
             plt.xlabel("Позиция токена в тексте")
-            plt.ylabel("Активация признака")
+            plt.ylabel("Сила внутреннего сигнала")
             plt.tight_layout()
-
             activation_plot_path = "static/sae_top_feature_trace.png"
             plt.savefig(activation_plot_path, bbox_inches="tight")
             plt.close()
 
-            token_preview = []
-            for i, (tok, val) in enumerate(zip(tokens[:80], token_latents[:80])):
-                token_preview.append({
-                    "pos": i,
-                    "token": tok,
-                    "activation": float(val),
-                })
+            for pos in pick_top_positions(primary_trace, k=3, min_gap=18):
+                frag_text = token_window_to_text(pos, window=10)
+                if frag_text:
+                    key_signal_fragments.append({
+                        "position": int(pos),
+                        "text": frag_text,
+                    })
+
+        if is_ai:
+            prediction_text = f"Текст классифицирован как ИИ-сгенерированный (уверенность: {confidence_pct}%)."
         else:
-            top_feature_idx = None
-            activation_plot_path = None
-            token_preview = []
+            prediction_text = f"Текст классифицирован как написанный человеком (уверенность: {confidence_pct}%)."
 
-        total_pos = float(np.sum(feature_contribs[feature_contribs > 0])) if np.any(feature_contribs > 0) else 0.0
-        total_neg = float(np.sum(np.abs(feature_contribs[feature_contribs < 0]))) if np.any(feature_contribs < 0) else 0.0
-        total_abs = float(np.sum(np.abs(feature_contribs))) if np.sum(np.abs(feature_contribs)) > 0 else 1.0
+        summary_text = (
+            f"Вероятность ИИ-текста = {ai_probability_pct}%, вероятность того, что текст написан человеком = {human_probability_pct}%. "
+            f"До порога 50% текущий вывод имеет запас {margin_pct} п.п. "
+            f"При анализе было обработано {analyzed_tokens} токенов."
+        )
 
-        ai_signal_pct = round(100.0 * total_pos / total_abs, 1)
-        human_signal_pct = round(100.0 * total_neg / total_abs, 1)
-        dominance_pct = round(100.0 * np.sum(np.abs(feature_contribs[top_abs_idx[:3]])) / total_abs, 1)
+        model_stage_explanation = (
+            f"В этом приложении анализ выполняется по внутреннему представлению текста на {detector.layer}-м слое модели DeepSeek, "
+            f"внутри блока {detector.hookpoint_name}. Это означает, что система смотрит не только на сами слова, "
+            f"но и на то, какой внутренний профиль возникает у текста в процессе чтения моделью. Затем классификатор XGBoost "
+            f"сравнивает этот профиль с примерами human- и AI-текстов, на которых он был обучен."
+        )
 
-        explanation = {
+        if is_ai:
+            simple_conclusion = (
+                "Внутренний профиль текста оказался ближе к тем представлениям, которые модель чаще видела у ИИ-генерации. "
+                "Поэтому итоговый вывод сместился в сторону машинного происхождения текста."
+            )
+        else:
+            simple_conclusion = (
+                "Внутренний профиль текста оказался ближе к тем представлениям, которые модель чаще видела у человеческих текстов. "
+                "Поэтому итоговый вывод сместился в сторону человеческого авторства."
+            )
+
+        return {
             "prediction": prediction,
-            "ai_score": round(prob_ai, 4),
-            "bias_term": round(bias_term, 4),
-            "summary": {
-                "ai_signal_pct": ai_signal_pct,
-                "human_signal_pct": human_signal_pct,
-                "dominance_pct": dominance_pct,
-            },
-            "top_ai_features": top_ai_features,
-            "top_human_features": top_human_features,
-            "top_feature_idx": top_feature_idx,
-            "barplot_path": "/" + barplot_path,
+            "prediction_text": prediction_text,
+            "confidence_pct": confidence_pct,
+            "ai_score": round((prob_ai if is_ai else prob_human), 4),
+            "ai_probability_pct": ai_probability_pct,
+            "human_probability_pct": human_probability_pct,
+            "analyzed_tokens": analyzed_tokens,
+            "margin_pct": margin_pct,
+            "summary_text": summary_text,
+            "model_stage_explanation": model_stage_explanation,
+            "simple_conclusion": simple_conclusion,
             "activation_plot_path": ("/" + activation_plot_path) if activation_plot_path else None,
-            "token_preview": token_preview,
+            "key_signal_fragments": key_signal_fragments,
             "layer": detector.layer,
             "hookpoint_name": detector.hookpoint_name,
             "model_name": detector.model_name,
+
+            # Пустые поля для совместимости со старым шаблоном, если он что-то ещё ожидает.
+            "supporting_signals": [],
+            "counter_signal": None,
+            "top_ai_features": [],
+            "top_human_features": [],
+            "top_feature_idx": None,
+            "barplot_path": None,
+            "token_preview": [],
+            "summary": {
+                "ai_probability_pct": ai_probability_pct,
+                "human_probability_pct": human_probability_pct,
+                "margin_pct": margin_pct,
+            },
         }
-        return explanation
 
     except Exception as e:
         return {"error": f"Ошибка анализа SAE/DeepSeek: {str(e)}"}
+
 
 # Flask App Setup
 app = Flask(__name__)
