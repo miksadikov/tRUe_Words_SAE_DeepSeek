@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Для разработчиков — trueWords API</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/developers.css') }}">
+</head>
+<body>
+  <div class="docs-shell">
+    <aside class="sidebar">
+      <div class="brand-block">
+        <a href="{{ url_for('home') }}" class="brand-link">
+          <span class="brand-mark"></span>
+          <span class="brand-title">trueWords</span>
+        </a>
+        <p class="brand-subtitle">Документация для разработчиков</p>
+      </div>
+
+      <nav class="sidebar-nav">
+        <div class="sidebar-group">
+          <div class="sidebar-title">Общее</div>
+          <a href="#overview" class="sidebar-link">Обзор API</a>
+          <a href="#quickstart" class="sidebar-link">Быстрый старт</a>
+          <a href="#auth" class="sidebar-link">Аутентификация</a>
+          <a href="#base-url" class="sidebar-link">Базовый адрес</a>
+        </div>
+
+        <div class="sidebar-group">
+          <div class="sidebar-title">HTTP API</div>
+          <a href="#health" class="sidebar-link">GET /health</a>
+          <a href="#ready" class="sidebar-link">GET /ready</a>
+          <a href="#methods" class="sidebar-link">GET /v1/methods</a>
+          <a href="#predict" class="sidebar-link">POST /v1/predict/dependencyai</a>
+          <a href="#analyze" class="sidebar-link">POST /v1/analyze/dependencyai</a>
+          <a href="#errors" class="sidebar-link">Ошибки</a>
+        </div>
+
+        <div class="sidebar-group">
+          <div class="sidebar-title">SDK</div>
+          <a href="#sdk-install" class="sidebar-link">Установка SDK</a>
+          <a href="#sdk-usage" class="sidebar-link">Использование SDK</a>
+        </div>
+
+        <div class="sidebar-group">
+          <div class="sidebar-title">Справка</div>
+          <a href="#responses" class="sidebar-link">Формат ответов</a>
+          <a href="#faq" class="sidebar-link">FAQ</a>
+        </div>
+      </nav>
+    </aside>
+
+    <main class="content">
+      <header class="topbar">
+        <div class="breadcrumbs"> trueWords API - документация </div>
+        <a href="{{ url_for('home') }}" class="back-link">Вернуться на главную</a>
+      </header>
+
+      <section class="hero" id="overview">
+        <span class="eyebrow">Для разработчиков</span>
+        <h1>trueWords API</h1>
+        <p class="hero-text">
+          HTTP API и Python SDK для интеграции детектора русскоязычных текстов, сгенерированных
+          искусственным интеллектом, во внешние приложения и сервисы.
+        </p>
+
+        <div class="hero-cards">
+          <div class="hero-card">
+            <div class="hero-card-title">Текущий публичный метод</div>
+            <div class="hero-card-value">DependencyAI</div>
+            <p>На текущем этапе внешний API предоставляет прогноз и расширенный анализ для метода DependencyAI.</p>
+          </div>
+          <div class="hero-card">
+            <div class="hero-card-title">Формат доступа</div>
+            <div class="hero-card-value">REST + Python SDK</div>
+            <p>Поддерживаются прямые HTTP-запросы и лёгкий клиентский пакет <code>truewords</code>.</p>
+          </div>
+          <div class="hero-card">
+            <div class="hero-card-title">Аутентификация</div>
+            <div class="hero-card-value">X-API-Key</div>
+            <p>Ключ передаётся в HTTP-заголовке и используется для всех защищённых маршрутов API.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="quickstart">
+        <h2>Быстрый старт</h2>
+        <p>
+          Ниже приведён минимальный сценарий использования API: сначала проверка готовности сервиса,
+          затем запрос прогноза для метода <code>dependencyai</code>.
+        </p>
+
+        <div class="code-block">
+<pre><code>curl https://truewords-api-app.amvera.io/ready
+
+curl -X POST "https://truewords-api-app.amvera.io/v1/predict/dependencyai" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -d '{
+    "text": "Это тестовый русский текст для проверки API."
+  }'</code></pre>
+        </div>
+      </section>
+
+      <section class="section" id="auth">
+        <h2>Аутентификация</h2>
+        <p>
+          Для доступа к защищённым маршрутам используется API-ключ. Ключ передаётся в заголовке
+          <code>X-API-Key</code>.
+        </p>
+        <div class="code-inline">X-API-Key: YOUR_API_KEY</div>
+      </section>
+
+      <section class="section" id="base-url">
+        <h2>Базовый адрес API</h2>
+        <p>При использовании облачного развёртывания вызовы отправляются на базовый адрес:</p>
+        <div class="code-inline">https://truewords-api-app.amvera.io</div>
+        <p>Для локального запуска можно использовать, например:</p>
+        <div class="code-inline">http://127.0.0.1:8000</div>
+      </section>
+
+      <section class="section" id="health">
+        <h2>GET /health</h2>
+        <p>Проверка того, что сервер запущен и отвечает на запросы.</p>
+        <div class="mini-grid">
+          <div class="mini-card">
+            <div class="mini-card-label">Назначение</div>
+            <div class="mini-card-value">Проверка доступности сервиса</div>
+          </div>
+          <div class="mini-card">
+            <div class="mini-card-label">Аутентификация</div>
+            <div class="mini-card-value">Не требуется</div>
+          </div>
+        </div>
+        <div class="code-block">
+<pre><code>curl https://truewords-api-app.amvera.io/health</code></pre>
+        </div>
+      </section>
+
+      <section class="section" id="ready">
+        <h2>GET /ready</h2>
+        <p>
+          Проверка готовности методов к работе. Этот маршрут полезен для диагностики развёртывания,
+          загрузки моделей и проверки, какие методы доступны в текущем окружении.
+        </p>
+        <div class="code-block">
+<pre><code>curl https://truewords-api-app.amvera.io/ready</code></pre>
+        </div>
+        <div class="response-card">
+          <div class="response-title">Пример ответа</div>
+<pre><code>{
+  "status": "ready",
+  "enabled_methods": ["dependencyai"],
+  "ready_methods": ["dependencyai"],
+  "failed_methods": {}
+}</code></pre>
+        </div>
+      </section>
+
+      <section class="section" id="methods">
+        <h2>GET /v1/methods</h2>
+        <p>
+          Возвращает сведения о поддерживаемых, включённых и готовых к работе методах. Это полезный
+          маршрут для клиентских приложений, которые должны понимать состав доступных детекторов.
+        </p>
+        <div class="code-block">
+<pre><code>curl https://truewords-api-app.amvera.io/v1/methods</code></pre>
+        </div>
+      </section>
+
+      <section class="section" id="predict">
+        <h2>POST /v1/predict/dependencyai</h2>
+        <p>
+          Быстрый прогноз для метода DependencyAI. Возвращает итоговый вердикт, вероятность класса AI
+          и уверенность в текущем решении.
+        </p>
+
+        <div class="two-col">
+          <div>
+            <h3>Тело запроса</h3>
+            <div class="response-card">
+<pre><code>{
+  "text": "Русскоязычный текст для анализа"
+}</code></pre>
+            </div>
+          </div>
+          <div>
+            <h3>Пример запроса</h3>
+            <div class="response-card">
+<pre><code>curl -X POST "https://truewords-api-app.amvera.io/v1/predict/dependencyai" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -d '{
+    "text": "Русскоязычный текст для анализа"
+  }'</code></pre>
+            </div>
+          </div>
+        </div>
+
+        <div class="response-card">
+          <div class="response-title">Пример ответа</div>
+<pre><code>{
+  "method": "dependencyai",
+  "label": "Human",
+  "ai_probability": 0.0870,
+  "confidence": 0.9130
+}</code></pre>
+        </div>
+      </section>
+
+      <section class="section" id="analyze">
+        <h2>POST /v1/analyze/dependencyai</h2>
+        <p>
+          Расширенный анализ для метода DependencyAI. Помимо итогового вердикта, этот маршрут
+          возвращает укрупнённую интерпретацию синтаксических сигналов, примеры предложений,
+          данные о надёжности интерпретации и диаграмму в виде base64 PNG.
+        </p>
+
+        <div class="code-block">
+<pre><code>curl -X POST "https://truewords-api-app.amvera.io/v1/analyze/dependencyai" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -d '{
+    "text": "Русскоязычный текст для анализа"
+  }'</code></pre>
+        </div>
+
+        <div class="response-card">
+          <div class="response-title">Ключевые поля ответа</div>
+          <ul class="field-list">
+            <li><code>method</code> — имя метода анализа.</li>
+            <li><code>label</code> — итоговый вердикт: <code>AI</code> или <code>Human</code>.</li>
+            <li><code>confidence</code> — уверенность в текущем вердикте.</li>
+            <li><code>summary_text</code> — итоговое текстовое объяснение результата.</li>
+            <li><code>main_reasons</code> — главные группы синтаксических сигналов.</li>
+            <li><code>counter_signal</code> — фактор, который частично противоречил итоговому выводу.</li>
+            <li><code>reliability</code> — оценка устойчивости синтаксической интерпретации.</li>
+            <li><code>sentence_examples</code> — предложения, наиболее показательные для текущего вердикта.</li>
+            <li><code>chart_base64_png</code> — диаграмма вклада групп признаков в виде base64 PNG.</li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="section" id="responses">
+        <h2>Формат ответов</h2>
+        <p>
+          Для пользовательских сценариев обычно достаточно двух полей: <code>label</code> и
+          <code>confidence</code>. Поле <code>ai_probability</code> сохраняется в ответе как техническое,
+          исследовательское поле и может использоваться в сценариях отладки, валидации и ансамблирования.
+        </p>
+
+        <div class="response-card">
+          <div class="response-title">Интерпретация полей</div>
+          <ul class="field-list">
+            <li><code>label</code> — итоговый вердикт модели.</li>
+            <li><code>confidence</code> — уверенность модели в этом вердикте.</li>
+            <li><code>ai_probability</code> — вероятность класса AI, сохраняемая в API для технических задач.</li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="section" id="errors">
+        <h2>Ошибки</h2>
+        <div class="response-card">
+          <table class="error-table">
+            <thead>
+              <tr>
+                <th>HTTP-статус</th>
+                <th>Смысл</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>401</td>
+                <td>Ошибка аутентификации: неверный или отсутствующий API-ключ.</td>
+              </tr>
+              <tr>
+                <td>404</td>
+                <td>Метод не поддерживается или маршрут не найден.</td>
+              </tr>
+              <tr>
+                <td>422</td>
+                <td>Некорректное тело запроса, чаще всего ошибка JSON или пустой текст.</td>
+              </tr>
+              <tr>
+                <td>503</td>
+                <td>Метод включён, но не готов к работе: не загрузились артефакты или модель.</td>
+              </tr>
+              <tr>
+                <td>500</td>
+                <td>Внутренняя ошибка сервера.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="section" id="sdk-install">
+        <h2>Установка Python SDK</h2>
+        <p>
+          Для Python-приложений доступен клиентский пакет <code>truewords</code>. На текущем этапе его
+          удобно устанавливать прямо из GitHub-репозитория.
+        </p>
+        <div class="code-block">
+<pre><code>pip install git+https://github.com/SadikovaMaria/truewords-python-sdk.git</code></pre>
+        </div>
+      </section>
+
+      <section class="section" id="sdk-usage">
+        <h2>Использование SDK</h2>
+        <div class="code-block">
+<pre><code>from truewords import TrueWords
+
+client = TrueWords(
+    api_key="YOUR_API_KEY",
+    method="dependencyai",
+    base_url="https://truewords-api-app.amvera.io"
+)
+
+result = client.predict("Ваш текст...")
+print(result.label)
+print(result.confidence)
+
+analysis = client.analyze("Ваш текст...")
+print(analysis.label)
+print(analysis.confidence)
+print(analysis.summary_text)</code></pre>
+        </div>
+      </section>
+
+      <section class="section" id="faq">
+        <h2>FAQ</h2>
+        <div class="faq-list">
+
+          <article class="faq-item">
+            <h3>Можно ли использовать только SDK, без прямых HTTP-запросов?</h3>
+            <p>
+              Да. Python SDK предназначен именно для того, чтобы скрыть низкоуровневую работу с HTTP и
+              возвращать удобные Python-объекты.
+            </p>
+          </article>
+
+          <article class="faq-item">
+            <h3>Какие методы будут доступны дальше?</h3>
+            <p>
+              Архитектура сервиса уже рассчитана на расширение. На следующих этапах в API могут быть
+              добавлены другие детекторы и итоговый ансамблевый режим.
+            </p>
+          </article>
+        </div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

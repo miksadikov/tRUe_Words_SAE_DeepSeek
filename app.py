@@ -1862,6 +1862,10 @@ app = Flask(__name__)
 def home():
     return render_template('index.html')
 
+@app.route('/developers')
+def developers():
+    return render_template('developers.html')
+
 @app.route('/predict', methods=['POST'])
 def predict():
     text = request.form.get('text', '')
